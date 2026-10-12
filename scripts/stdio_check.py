@@ -1,87 +1,92 @@
 #!/usr/bin/env python3
-"""Speak JSON-RPC to the server over stdio, the way a real client does.
+"""Check the MCP handshake and tool discovery over a real stdio subprocess.
 
-Run:  python scripts/stdio_check.py
+Run: python scripts/stdio_check.py
 
-The smoke test calls the tool functions directly, which proves the maths but
-not the wiring. This launches the server as a subprocess, performs the MCP
-handshake and asks for the tool list, which is exactly what Claude Desktop
-does when it starts.
+The smoke test calls functions directly. This script exercises the protocol
+boundary used by MCP clients, including the ordered initialization exchange.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def rpc(msg: dict) -> str:
-    return json.dumps(msg) + "\n"
+def rpc(message: dict) -> bytes:
+    return (json.dumps(message) + "\n").encode("utf-8")
 
 
-def main() -> None:
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "venue_ops_mcp.server"],
-        cwd=ROOT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        bufsize=1,
-    )
-
-    handshake = (
-        rpc(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "stdio_check", "version": "0"},
-                },
-            }
-        )
-        + rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        + rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    )
-
-    try:
-        out, err = proc.communicate(handshake, timeout=25)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate()
-
-    tools: list[str] = []
-    server_name = ""
-    for line in out.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
+async def response_for(process: asyncio.subprocess.Process, request_id: int) -> dict:
+    assert process.stdout is not None
+    while True:
+        line = await asyncio.wait_for(process.stdout.readline(), timeout=25)
+        if not line:
+            raise RuntimeError(f"Server closed stdout before response {request_id}")
         try:
-            msg = json.loads(line)
+            message = json.loads(line)
         except json.JSONDecodeError:
             continue
-        result = msg.get("result", {})
-        if "serverInfo" in result:
-            server_name = result["serverInfo"].get("name", "")
-        if "tools" in result:
-            tools = [t["name"] for t in result["tools"]]
+        if message.get("id") != request_id:
+            continue
+        if "error" in message:
+            raise RuntimeError(f"JSON-RPC error for {request_id}: {message['error']}")
+        return message.get("result", {})
 
+
+async def main() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "venue_ops_mcp.server",
+        cwd=ROOT,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stderr is not None
+
+    try:
+        process.stdin.write(
+            rpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "stdio_check", "version": "0"},
+                    },
+                }
+            )
+        )
+        await process.stdin.drain()
+        initialized = await response_for(process, 1)
+
+        process.stdin.write(rpc({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        process.stdin.write(rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        await process.stdin.drain()
+        listed = await response_for(process, 2)
+    finally:
+        process.stdin.close()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+    server_name = initialized.get("serverInfo", {}).get("name", "")
+    tools = [item["name"] for item in listed.get("tools", [])]
     print(f"server name : {server_name or '(none)'}")
     print(f"tools       : {len(tools)}")
-    for t in sorted(tools):
-        print(f"  - {t}")
-
-    if err.strip():
-        print("\nstderr:")
-        print(err.strip()[:800])
+    for tool in sorted(tools):
+        print(f"  - {tool}")
 
     expected = {
         "venue_ops_list_venues",
@@ -92,10 +97,13 @@ def main() -> None:
     }
     missing = expected - set(tools)
     if server_name != "venue_ops_mcp" or missing:
+        error_output = (await process.stderr.read()).decode("utf-8", errors="replace")
+        if error_output.strip():
+            print("\nstderr:\n" + error_output[:800])
         print(f"\nFAILED. missing tools: {sorted(missing) or 'none'}")
         sys.exit(1)
     print("\nHandshake OK, all five tools advertised.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
