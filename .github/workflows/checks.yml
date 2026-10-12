@@ -1,0 +1,26 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e .
+      - name: Generate deterministic sample data
+        run: python scripts/generate_data.py
+      - name: Check tools and planted anomalies
+        run: python scripts/smoke_test.py
+      - name: Check the MCP stdio handshake
+        run: python scripts/stdio_check.py

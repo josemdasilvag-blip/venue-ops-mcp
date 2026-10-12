@@ -1,5 +1,7 @@
 # venue-ops-mcp
 
+[![Checks](https://github.com/josemdasilvag-blip/venue-ops-mcp/actions/workflows/checks.yml/badge.svg)](https://github.com/josemdasilvag-blip/venue-ops-mcp/actions/workflows/checks.yml)
+
 An MCP server that gives Claude or any MCP client direct, read-only access to
 the daily trading figures of a multi-site restaurant group — and, more to the
 point, to the numbers where money leaves without anyone writing it down.
@@ -118,6 +120,9 @@ python scripts/stdio_check.py   # the MCP handshake a real client performs
 `smoke_test.py` asserts that the Barcelona drift is still detected and that a
 clean window produces **no** findings. A detector that fires on everything is
 worse than no detector, so both directions are tested.
+
+GitHub Actions runs both checks on pushes and pull requests with Python 3.10
+and 3.12. The badge above links to the public results.
 
 ## Built with
 
